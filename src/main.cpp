@@ -1,10 +1,33 @@
 #include <Arduino.h>
-#include <BluetoothSerial.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 
-BluetoothSerial SerialBT;
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+
 LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// BLE
+BLECharacteristic *pCharacteristic;
+bool deviceConnected = false;
+
+#define SERVICE_UUID        "12345678-1234-1234-1234-1234567890ab"
+#define CHARACTERISTIC_UUID "abcd1234-1234-1234-1234-abcdef123456"
+
+class MyServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer* pServer) {
+    deviceConnected = true;
+    Serial.println("BLE conectado");
+  }
+
+  void onDisconnect(BLEServer* pServer) {
+    deviceConnected = false;
+    Serial.println("BLE desconectado");
+    pServer->startAdvertising();
+  }
+};
 
 // Pinos
 #define PIN_GUIDAO 27
@@ -56,6 +79,8 @@ void enviarBluetooth();
 void atualizarLCD();
 String direcaoGuidao();
 void resetarRelatorio();
+void enviarBLE(String msg);
+void iniciarBLE();
 
 void setup() {
   Serial.begin(115200);
@@ -79,7 +104,7 @@ void setup() {
   lcd.setCursor(0, 1);
   lcd.print("Aguardando...");
 
-  SerialBT.begin("BicicleTEAr_ESP32");
+  iniciarBLE();
 
   Serial.println("Sistema pronto");
 }
@@ -93,6 +118,43 @@ void loop() {
   }
 
   atualizarLCD();
+}
+
+void iniciarBLE() {
+  BLEDevice::init("BicicleTEAr_BLE");
+
+  BLEServer *pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+
+  pCharacteristic = pService->createCharacteristic(
+    CHARACTERISTIC_UUID,
+    BLECharacteristic::PROPERTY_READ |
+    BLECharacteristic::PROPERTY_NOTIFY
+  );
+
+  pCharacteristic->addDescriptor(new BLE2902());
+
+  pCharacteristic->setValue("BicicleTEAr pronto");
+
+  pService->start();
+
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->setScanResponse(true);
+  pAdvertising->start();
+
+  Serial.println("BLE iniciado: BicicleTEAr_BLE");
+}
+
+void enviarBLE(String msg) {
+  if (deviceConnected) {
+    pCharacteristic->setValue(msg.c_str());
+    pCharacteristic->notify();
+  }
+
+  Serial.println(msg);
 }
 
 void lerBotoes() {
@@ -118,32 +180,35 @@ void lerBotoes() {
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print("Iniciando...");
-    SerialBT.println("EVENT,START");
+
+    enviarBLE("EVENT,START");
+
     delay(500);
   }
 
   if (antStop == HIGH && stopAtual == LOW) {
     estado = REPORT;
 
-    SerialBT.println("EVENT,STOP");
+    enviarBLE("EVENT,STOP");
 
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print("Sessao");
     lcd.setCursor(0, 1);
     lcd.print("finalizada");
+
     delay(800);
   }
 
   if (estado == RUNNING) {
     if (antBtn3 == HIGH && btn3Atual == LOW) {
       contBtn3++;
-      SerialBT.println("EVENT,BTN3");
+      enviarBLE("EVENT,BTN3");
     }
 
     if (antBtn4 == HIGH && btn4Atual == LOW) {
       contBtn4++;
-      SerialBT.println("EVENT,BTN4");
+      enviarBLE("EVENT,BTN4");
     }
   }
 
@@ -157,10 +222,8 @@ void lerSensores() {
   int leituraGuidao = analogRead(PIN_GUIDAO);
   int leituraVel = analogRead(PIN_VEL);
 
-  // Guidão: 0 a 180 graus
   angulo = map(leituraGuidao, 0, 4095, 0, 180);
 
-  // Velocidade: 0 a 100 km/h
   velocidade = (leituraVel / 4095.0) * 100.0;
 
   if (estado == RUNNING) {
@@ -195,32 +258,16 @@ void enviarBluetooth() {
     tBluetooth = agora;
     pacotes++;
 
-    SerialBT.print("DATA,");
-    SerialBT.print("pac=");
-    SerialBT.print(pacotes);
-    SerialBT.print(",");
+    String msg = "DATA,";
+    msg += "pac=" + String(pacotes) + ",";
+    msg += "ang=" + String(angulo) + ",";
+    msg += "dir=" + direcaoGuidao() + ",";
+    msg += "vel=" + String(velocidade) + ",";
+    msg += "btn3=" + String(btn3Press ? 1 : 0) + ",";
+    msg += "btn4=" + String(btn4Press ? 1 : 0) + ",";
+    msg += "state=RUNNING";
 
-    SerialBT.print("ang=");
-    SerialBT.print(angulo);
-    SerialBT.print(",");
-
-    SerialBT.print("dir=");
-    SerialBT.print(direcaoGuidao());
-    SerialBT.print(",");
-
-    SerialBT.print("vel=");
-    SerialBT.print(velocidade);
-    SerialBT.print(",");
-
-    SerialBT.print("btn3=");
-    SerialBT.print(btn3Press ? 1 : 0);
-    SerialBT.print(",");
-
-    SerialBT.print("btn4=");
-    SerialBT.print(btn4Press ? 1 : 0);
-    SerialBT.print(",");
-
-    SerialBT.println("state=RUNNING");
+    enviarBLE(msg);
   }
 }
 
@@ -251,7 +298,6 @@ void atualizarLCD() {
     lcd.print(direcaoGuidao());
     lcd.print(" V:");
     lcd.print((int)velocidade);
-    lcd.print("km/h");
 
     lcd.setCursor(0, 1);
     lcd.print("3:");
@@ -265,24 +311,23 @@ void atualizarLCD() {
   }
 
   else if (estado == REPORT) {
-    if (tela == 0) {
-      lcd.setCursor(0, 0);
-      lcd.print("B3:");
-      lcd.print(contBtn3);
-      lcd.print(" B4:");
-      lcd.print(contBtn4);
-      lcd.print("V:");
-      lcd.print(contVelAmostras);
+    lcd.setCursor(0, 0);
+    lcd.print("B3:");
+    lcd.print(contBtn3);
+    lcd.print(" B4:");
+    lcd.print(contBtn4);
+    lcd.print(" V:");
+    lcd.print(contVelAmostras);
 
-      lcd.setCursor(0, 1);
-      lcd.print("D:");
-      lcd.print(contDireita);
-      lcd.print("C:");
-      lcd.print(contCentro);
-      lcd.print("E:");
-      lcd.print(contEsquerda);
-      
-    }
+    lcd.setCursor(0, 1);
+    lcd.print("D:");
+    lcd.print(contDireita);
+    lcd.print(" C:");
+    lcd.print(contCentro);
+    lcd.print(" E:");
+    lcd.print(contEsquerda);
+
+    tela++;
     if (tela > 2) tela = 0;
   }
 }
